@@ -43,9 +43,23 @@ This design currently targets:
 - In this implementation the operation begins at stage `counter=1` and completes at `counter=7`.
 - `out_valid` asserts on the cycle where stage 7 packing finishes.
 
-A safe expectation for system-level timing is:
-- **`out_valid` occurs 7 clock cycles after the start edge** (the clock edge where `valid` was sampled when idle).
+The start edge is the rising clock edge where `valid=1` is sampled while
+`busy=0`. This is cycle N.
 
+The required timing is:
+
+- Cycle N: accept `valid`, register `a` and `b`, and start the operation.
+- Cycle N+1: Stage 1 — Unpack.
+- Cycle N+2: Stage 2 — Special classification + denormal setup.
+- Cycle N+3: Stage 3 — Input normalization.
+- Cycle N+4: Stage 4 — Multiply core.
+- Cycle N+5: Stage 5 — Extract mantissa and rounding bits.
+- Cycle N+6: Stage 6 — Normalize and round.
+- Cycle N+7: Stage 7 — Pack; update `z` and assert `out_valid`.
+
+Therefore, if an operation is accepted on rising edge N, `out_valid` must
+assert on rising edge N+7. `out_valid` must remain high for exactly one
+clock cycle.
 ### Throughput
 - **Not pipelined** (single-issue).
 - Max throughput is **1 result per 7 cycles** (assuming `valid` is asserted only when idle).
@@ -109,13 +123,35 @@ All stage actions are performed inside a single sequential always block using `c
 
 ### Stage 6 — Normalize + Round-to-Nearest-Even (RNE)
 This stage performs:
-1. **Underflow alignment** toward exponent -126:
-   - Computes shift amount `sh = (-126 - z_e)` when `z_e < -126`.
-   - Shifts mantissa right and accumulates shifted-out bits into sticky.
-2. **Normalize** if MSB missing:
-   - Left-shifts mantissa while adjusting exponent, carrying guard into LSB.
+1. **Underflow alignment** toward the minimum normal exponent:
+   - If the intermediate exponent `z_e` is below `-126`, the significand
+     must be shifted right enough to bring the exponent to `-126`.
+   - Every bit discarded by this right shift must contribute to the sticky
+     condition used for rounding.
+   - The existing guard, round, and sticky information must not be silently
+     discarded when performing this alignment; the implementation must
+     preserve enough information to make the final RNE decision correctly.
+   - After alignment, the exponent used for packing must represent the
+     resulting value at the `-126` boundary.
+
+2. **Normalize** when the significand is not in the required normalized
+   position:
+   - If the most-significant significand bit is missing, shift the
+     significand left until the required leading bit is restored.
+   - Decrement the exponent for every left shift.
+   - Bits shifted through the rounding boundary must be incorporated into
+     the rounding information rather than discarded.
 3. **RNE rounding**:
-   - If `G == 1` and `(R || S || LSB)` then increment mantissa.
+   - Perform round-to-nearest-even using the values of `G`, `R`, `S`, and
+  the current least-significant retained mantissa bit (`LSB`) after all
+  normalization and underflow alignment are complete.
+- The rounding increment condition is exactly:
+  `round_up = G && (R || S || LSB)`.
+- Do not make the rounding decision using G/R/S values from before a
+  normalization or underflow shift.
+- If rounding increments the retained mantissa and causes a carry into
+  the next exponent position, renormalize the mantissa and increment the
+  exponent by one.
    - Handles carry-out from rounding:
      - If rounding overflows mantissa, set mantissa to 0x800000 and increment exponent.
 
@@ -140,3 +176,5 @@ Recommended testbench behavior for this handshake design:
 - Generate only normal operands,
 
 ---
+
+
