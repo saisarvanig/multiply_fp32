@@ -100,10 +100,23 @@ All stage actions are performed inside a single sequential always block using `c
   - If exponent is nonzero => sets implicit leading 1: `a_m[23] = 1`.
   - If exponent is zero (subnormal) => forces exponent to -126 (subnormal exponent baseline).
 
-> If you restrict inputs to **normal numbers only**, then:
-> - `expA` and `expB` are always 1..254,
-> - hidden-one insertion always happens,
-> - special logic is bypassed in practice.
+- Even though the grading domain is normal finite inputs, the RTL must still
+  implement the Stage 2 classification signals already implied by the design:
+  `a_is_nan`, `b_is_nan`, `a_is_inf`, `b_is_inf`, `a_is_zero`, and `b_is_zero`.
+- If a special case is detected, latch a `special_case` flag and the final
+  `special_z` value in Stage 2 so that Stage 7 can return that value directly
+  without running the ordinary multiplication/normalization path.
+- Apply special-case priority in this exact order:
+  1. If either operand is NaN, or if one operand is infinity and the other is
+     zero, produce canonical quiet NaN `32'h7FC0_0000`.
+  2. Otherwise, if either operand is infinity, produce signed infinity
+     `{a_s ^ b_s, 8'hFF, 23'd0}`.
+  3. Otherwise, if either operand is zero, produce signed zero
+     `{a_s ^ b_s, 8'd0, 23'd0}`.
+- NaN payloads must not be propagated; every NaN result uses exactly
+  `32'h7FC0_0000`.
+- For normal finite inputs, continue through the ordinary seven-stage multiply
+  path unchanged.
 
 ### Stage 3 — Input normalization (lightweight)
 - If mantissa MSB is not set, shift left and decrement exponent.
@@ -113,7 +126,48 @@ All stage actions are performed inside a single sequential always block using `c
 - Compute result sign: `z_s = a_s ^ b_s`
 - Exponent add: `z_e = a_e + b_e + 1`
 - Mantissa product: `product = a_m * b_m * 4`
+  - The `*4` scaling aligns the product for extraction into `{z_m, G, R, S}`.	
+- The `+1` exponent adjustment and `*4` product scaling are a coupled
+  representation choice and must be preserved together.
+- Each normalized 24-bit mantissa represents a value whose hidden leading `1`
+  is at bit 23. Their raw product therefore occupies bits 46..47 before
+  scaling. The `*4` left shift moves the significant product two bits higher,
+  after which Stage 5 extracts `product[49:26]` as the 24-bit working
+  significand.
+- Therefore the exponent calculation must remain
+  `z_e = a_e + b_e + 1`. Do not remove the `+1`, and do not change the `*4`
+  scaling independently of it.
+- Do not replace the specified product/exponent representation with a
+  conventional unscaled 48-bit multiply followed by a different normalization
+  scheme; the seven-stage interface and Stage 5 bit extraction depend on the
+  specified representation.
   - The `*4` scaling aligns the product for extraction into `{z_m, G, R, S}`.
+- The multiplication must be performed at sufficient width to preserve the
+  complete product before the `*4` scaling. Do not rely on the destination
+  register width to widen a 24-bit multiplication expression.
+- Since `a_m` and `b_m` are 24-bit values and `product` is 50 bits, explicitly
+  widen the operands before multiplication. An equivalent implementation is:
+
+  `product = ({26'd0, a_m} * {26'd0, b_m}) << 2`
+
+- The final scaled product must retain all required bits in `product[49:0]`;
+  do not truncate the multiplication to 24 bits.
+
+- The `+1` exponent adjustment and the `*4` product scaling are a coupled
+  representation choice and must be preserved together.
+- Each normalized 24-bit mantissa has its hidden leading `1` at bit 23. Their
+  raw product therefore occupies the expected high product bits; the `*4`
+  scaling shifts the product so that Stage 5 can extract
+  `product[49:26]` as the 24-bit working significand.
+- Therefore keep:
+  `z_e = a_e + b_e + 1`
+  and
+  `product = a_m * b_m * 4`
+  together. Do not remove the `+1` or change the `*4` scaling independently.
+- The Stage 5 bit extraction depends on this representation. Do not replace it
+  with a differently scaled product or a different exponent convention.
+
+### Stage 5 — Extract mantissa + rounding bits
 
 ### Stage 5 — Extract mantissa + rounding bits
 - `z_m = product[49:26]`
@@ -122,45 +176,6 @@ All stage actions are performed inside a single sequential always block using `c
 - `sticky = OR(product[23:0])`
 
 ### Stage 6 — Normalize + Round-to-Nearest-Even (RNE)
-
-**Stage 6 implementation and verification requirement**
-
-Stage 6 is a complete same-cycle calculation. The implementation must perform
-the required underflow alignment, normalization, and RNE rounding while
-`counter == 6`, using the result of each sub-step as the input to the next
-sub-step.
-
-Use local working variables with blocking assignments (`=`) for intermediate
-Stage 6 calculations, and commit the final values to the registered state
-signals with non-blocking assignments (`<=`) at the end of the Stage 6 branch.
-
-Do not replace the required Stage 6 algorithm with a simplified normal-input
-fast path.
-
-Do not move any Stage 6 arithmetic into Stage 7. Stage 7 is only responsible
-for packing the already-finalized Stage 6 result and generating `out_valid`.
-
-Do not perform speculative rewrites merely because the code uses block-local
-temporary variables. If the RTL compiles successfully, preserve the working
-implementation structure. Change the implementation only when an actual
-compiler, simulator, or test failure requires it.
-
-If block-local temporary declarations cause a real compiler error, use
-module-level temporary signals while preserving the same blocking-assignment
-calculation order. Do not remove or postpone the Stage 6 algorithm merely to
-avoid temporary variables.
-
-The intended Stage 6 flow is:
-
-1. Start from working copies of `z_m`, `z_e`, `guard_bit`, `round_bit`, and
-   `sticky`.
-2. Perform underflow alignment and update the working G/R/S information.
-3. Perform required normalization using the updated working values.
-4. Perform RNE using the updated working mantissa and G/R/S values.
-5. Handle rounding carry by renormalizing the mantissa and incrementing the
-   exponent when required.
-6. Commit the final working values to the registered state signals.
-7. Advance to `counter == 7`.
 
 This stage performs:
 1. **Underflow alignment** toward the minimum normal exponent:
@@ -196,6 +211,8 @@ This stage performs:
      - If rounding overflows mantissa, set mantissa to 0x800000 and increment exponent.
 
 ### Stage 7 — Pack
+- If `special_case` is set, output the latched `special_z` instead of the
+  computed normal-path result.
 - For normal path:
   - Pack sign, biased exponent, fraction.
   - If exponent indicates overflow -> output INF.
