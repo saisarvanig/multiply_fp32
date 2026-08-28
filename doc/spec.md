@@ -128,6 +128,29 @@ This stage performs:
      must be shifted right enough to bring the exponent to `-126`.
    - Every bit discarded by this right shift must contribute to the sticky
      condition used for rounding.
+- The right shift must update the rounding bits as an exact bit-position
+  transformation, not by using an approximate or shift-size-specific shortcut.
+  Before the shift, the precision boundary is:
+
+  `{z_m[23:0], G, R, S}`
+
+  where `S` represents the OR of all bits below `R`.
+
+- For a right shift by `sh > 0`, the new retained mantissa is
+  `z_m >> sh`. The new `G` and `R` bits must be taken from the original
+  significand bits immediately below the new retained boundary, while every
+  original bit shifted farther below the new `R` position, together with the
+  old `G`, old `R`, and old `S` when they are displaced, must be ORed into the
+  new sticky bit.
+
+- Equivalently, after a right shift by `sh`, the implementation must preserve
+  the exact ordering of the retained bits followed by the next two discarded
+  bits and the OR of all remaining discarded bits. Do not simply set
+  `G=0`, `R=0`, or `S=1` for all shifts greater than a small constant unless
+  those values are mathematically implied by the actual discarded bits.
+
+- The updated G/R/S values must then be used by the final RNE calculation in
+  the same Stage 6 operation.
    - The existing guard, round, and sticky information must not be silently
      discarded when performing this alignment; the implementation must
      preserve enough information to make the final RNE decision correctly.
