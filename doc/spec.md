@@ -113,7 +113,7 @@ All stage actions are performed inside a single sequential always block using `c
 - Compute result sign: `z_s = a_s ^ b_s`
 - Exponent add: `z_e = a_e + b_e + 1`
 - Mantissa product: `product = a_m * b_m * 4`
-  - The `*4` scaling aligns the product for extraction into `{z_m, G, R, S}`.	
+  - The `*4` scaling aligns the product for extraction into `{z_m, G, R, S}`.
 - The multiplication must be performed at sufficient width to preserve the
   complete product before the `*4` scaling. Do not rely on the destination
   register width to widen a 24-bit multiplication expression.
@@ -124,6 +124,22 @@ All stage actions are performed inside a single sequential always block using `c
 
 - The final scaled product must retain all required bits in `product[49:0]`;
   do not truncate the multiplication to 24 bits.
+
+- The `+1` exponent adjustment and the `*4` product scaling are a coupled
+  representation choice and must be preserved together.
+- Each normalized 24-bit mantissa has its hidden leading `1` at bit 23. Their
+  raw product therefore occupies the expected high product bits; the `*4`
+  scaling shifts the product so that Stage 5 can extract
+  `product[49:26]` as the 24-bit working significand.
+- Therefore keep:
+  `z_e = a_e + b_e + 1`
+  and
+  `product = a_m * b_m * 4`
+  together. Do not remove the `+1` or change the `*4` scaling independently.
+- The Stage 5 bit extraction depends on this representation. Do not replace it
+  with a differently scaled product or a different exponent convention.
+
+### Stage 5 — Extract mantissa + rounding bits
 
 ### Stage 5 — Extract mantissa + rounding bits
 - `z_m = product[49:26]`
