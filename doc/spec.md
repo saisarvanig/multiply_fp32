@@ -113,7 +113,31 @@ All stage actions are performed inside a single sequential always block using `c
 - Compute result sign: `z_s = a_s ^ b_s`
 - Exponent add: `z_e = a_e + b_e + 1`
 - Mantissa product: `product = a_m * b_m * 4`
-  - The `*4` scaling aligns the product for extraction into `{z_m, G, R, S}`.
+  - The `*4` scaling aligns the product for extraction into `{z_m, G, R, S}`.	
+- The `+1` exponent adjustment and `*4` product scaling are a coupled
+  representation choice and must be preserved together.
+- Each normalized 24-bit mantissa represents a value whose hidden leading `1`
+  is at bit 23. Their raw product therefore occupies bits 46..47 before
+  scaling. The `*4` left shift moves the significant product two bits higher,
+  after which Stage 5 extracts `product[49:26]` as the 24-bit working
+  significand.
+- Therefore the exponent calculation must remain
+  `z_e = a_e + b_e + 1`. Do not remove the `+1`, and do not change the `*4`
+  scaling independently of it.
+- Do not replace the specified product/exponent representation with a
+  conventional unscaled 48-bit multiply followed by a different normalization
+  scheme; the seven-stage interface and Stage 5 bit extraction depend on the
+  specified representation.
+- The multiplication must be performed at sufficient width to preserve the
+  complete product before the `*4` scaling. Do not rely on the destination
+  register width to widen a 24-bit multiplication expression.
+- Since `a_m` and `b_m` are 24-bit values and `product` is 50 bits, explicitly
+  widen the operands before multiplication. An equivalent implementation is:
+
+  `product = ({26'd0, a_m} * {26'd0, b_m}) << 2`
+
+- The final scaled product must retain all required bits in `product[49:0]`;
+  do not truncate the multiplication to 24 bits.
 
 ### Stage 5 — Extract mantissa + rounding bits
 - `z_m = product[49:26]`
@@ -122,35 +146,13 @@ All stage actions are performed inside a single sequential always block using `c
 - `sticky = OR(product[23:0])`
 
 ### Stage 6 — Normalize + Round-to-Nearest-Even (RNE)
+
 This stage performs:
 1. **Underflow alignment** toward the minimum normal exponent:
    - If the intermediate exponent `z_e` is below `-126`, the significand
      must be shifted right enough to bring the exponent to `-126`.
    - Every bit discarded by this right shift must contribute to the sticky
      condition used for rounding.
-- The right shift must update the rounding bits as an exact bit-position
-  transformation, not by using an approximate or shift-size-specific shortcut.
-  Before the shift, the precision boundary is:
-
-  `{z_m[23:0], G, R, S}`
-
-  where `S` represents the OR of all bits below `R`.
-
-- For a right shift by `sh > 0`, the new retained mantissa is
-  `z_m >> sh`. The new `G` and `R` bits must be taken from the original
-  significand bits immediately below the new retained boundary, while every
-  original bit shifted farther below the new `R` position, together with the
-  old `G`, old `R`, and old `S` when they are displaced, must be ORed into the
-  new sticky bit.
-
-- Equivalently, after a right shift by `sh`, the implementation must preserve
-  the exact ordering of the retained bits followed by the next two discarded
-  bits and the OR of all remaining discarded bits. Do not simply set
-  `G=0`, `R=0`, or `S=1` for all shifts greater than a small constant unless
-  those values are mathematically implied by the actual discarded bits.
-
-- The updated G/R/S values must then be used by the final RNE calculation in
-  the same Stage 6 operation.
    - The existing guard, round, and sticky information must not be silently
      discarded when performing this alignment; the implementation must
      preserve enough information to make the final RNE decision correctly.
@@ -179,21 +181,11 @@ This stage performs:
      - If rounding overflows mantissa, set mantissa to 0x800000 and increment exponent.
 
 ### Stage 7 — Pack
-
-- Stage 7 must only consume the finalized mantissa and exponent produced by
-  Stage 6. Do not perform normalization, shifting, or rounding in Stage 7.
-- For normal results, pack sign, biased exponent, and fraction.
-- If the finalized unbiased exponent is greater than `127`, output signed
-  infinity:
-  `{z_s, 8'hFF, 23'd0}`.
-- If the finalized exponent is exactly `-126` and `z_m[23] == 0`, pack the
-  result as a subnormal/zero representation with exponent field `0` and
-  retain `z_m[22:0]`.
-- If the finalized exponent is exactly `-126` and `z_m[23] == 1`, pack it as
-  the minimum normal result with exponent field `1`.
-- Do not convert a nonzero finalized subnormal mantissa to zero merely because
-  the exponent is `-126`.
-- Update `z`, assert `out_valid` for exactly one cycle, and clear `busy`.
+- For normal path:
+  - Pack sign, biased exponent, fraction.
+  - If exponent indicates overflow -> output INF.
+  - If exponent indicates exact denorm boundary -> force exponent field to 0 (denormal/zero representation).
+- Asserts `out_valid` for one cycle and clears `busy`.
 
 ---
 
