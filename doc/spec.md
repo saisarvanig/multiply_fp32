@@ -122,46 +122,6 @@ All stage actions are performed inside a single sequential always block using `c
 - `sticky = OR(product[23:0])`
 
 ### Stage 6 — Normalize + Round-to-Nearest-Even (RNE)
-
-**Stage 6 implementation and verification requirement**
-
-Stage 6 is a complete same-cycle calculation. The implementation must perform
-the required underflow alignment, normalization, and RNE rounding while
-`counter == 6`, using the result of each sub-step as the input to the next
-sub-step.
-
-Use local working variables with blocking assignments (`=`) for intermediate
-Stage 6 calculations, and commit the final values to the registered state
-signals with non-blocking assignments (`<=`) at the end of the Stage 6 branch.
-
-Do not replace the required Stage 6 algorithm with a simplified normal-input
-fast path.
-
-Do not move any Stage 6 arithmetic into Stage 7. Stage 7 is only responsible
-for packing the already-finalized Stage 6 result and generating `out_valid`.
-
-Do not perform speculative rewrites merely because the code uses block-local
-temporary variables. If the RTL compiles successfully, preserve the working
-implementation structure. Change the implementation only when an actual
-compiler, simulator, or test failure requires it.
-
-If block-local temporary declarations cause a real compiler error, use
-module-level temporary signals while preserving the same blocking-assignment
-calculation order. Do not remove or postpone the Stage 6 algorithm merely to
-avoid temporary variables.
-
-The intended Stage 6 flow is:
-
-1. Start from working copies of `z_m`, `z_e`, `guard_bit`, `round_bit`, and
-   `sticky`.
-2. Perform underflow alignment and update the working G/R/S information.
-3. Perform required normalization using the updated working values.
-4. Perform RNE using the updated working mantissa and G/R/S values.
-5. Handle rounding carry by renormalizing the mantissa and incrementing the
-   exponent when required.
-6. Commit the final working values to the registered state signals.
-7. Advance to `counter == 7`.
-
 This stage performs:
 1. **Underflow alignment** toward the minimum normal exponent:
    - If the intermediate exponent `z_e` is below `-126`, the significand
@@ -174,17 +134,13 @@ This stage performs:
    - After alignment, the exponent used for packing must represent the
      resulting value at the `-126` boundary.
 
-2. **Normalize** only when the underflow-alignment condition was false:
-   - Underflow alignment and normal-result normalization are mutually
-     exclusive operations.
-   - Implement this as one conditional path: if `z_e < -126`, perform the
-     required right-shift alignment to `-126`; otherwise, if the significand
-     is not normalized, perform left-shift normalization.
-   - Never perform a left-shift normalization after an underflow alignment in
-     the same Stage 6 operation.
-   - For normal-result normalization, decrement the exponent for each left
-     shift and preserve all rounding information crossing the G/R/S boundary.
-   - The exponent must never be reduced below `-126` by this normalization.
+2. **Normalize** when the significand is not in the required normalized
+   position:
+   - If the most-significant significand bit is missing, shift the
+     significand left until the required leading bit is restored.
+   - Decrement the exponent for every left shift.
+   - Bits shifted through the rounding boundary must be incorporated into
+     the rounding information rather than discarded.
 3. **RNE rounding**:
    - Perform round-to-nearest-even using the values of `G`, `R`, `S`, and
   the current least-significant retained mantissa bit (`LSB`) after all
