@@ -113,17 +113,7 @@ All stage actions are performed inside a single sequential always block using `c
 - Compute result sign: `z_s = a_s ^ b_s`
 - Exponent add: `z_e = a_e + b_e + 1`
 - Mantissa product: `product = a_m * b_m * 4`
-  - The `*4` scaling aligns the product for extraction into `{z_m, G, R, S}`.	
-- The multiplication must be performed at sufficient width to preserve the
-  complete product before the `*4` scaling. Do not rely on the destination
-  register width to widen a 24-bit multiplication expression.
-- Since `a_m` and `b_m` are 24-bit values and `product` is 50 bits, explicitly
-  widen the operands before multiplication. An equivalent implementation is:
-
-  `product = ({26'd0, a_m} * {26'd0, b_m}) << 2`
-
-- The final scaled product must retain all required bits in `product[49:0]`;
-  do not truncate the multiplication to 24 bits.
+  - The `*4` scaling aligns the product for extraction into `{z_m, G, R, S}`.
 
 ### Stage 5 — Extract mantissa + rounding bits
 - `z_m = product[49:26]`
@@ -132,6 +122,45 @@ All stage actions are performed inside a single sequential always block using `c
 - `sticky = OR(product[23:0])`
 
 ### Stage 6 — Normalize + Round-to-Nearest-Even (RNE)
+
+**Stage 6 implementation and verification requirement**
+
+Stage 6 is a complete same-cycle calculation. The implementation must perform
+the required underflow alignment, normalization, and RNE rounding while
+`counter == 6`, using the result of each sub-step as the input to the next
+sub-step.
+
+Use local working variables with blocking assignments (`=`) for intermediate
+Stage 6 calculations, and commit the final values to the registered state
+signals with non-blocking assignments (`<=`) at the end of the Stage 6 branch.
+
+Do not replace the required Stage 6 algorithm with a simplified normal-input
+fast path.
+
+Do not move any Stage 6 arithmetic into Stage 7. Stage 7 is only responsible
+for packing the already-finalized Stage 6 result and generating `out_valid`.
+
+Do not perform speculative rewrites merely because the code uses block-local
+temporary variables. If the RTL compiles successfully, preserve the working
+implementation structure. Change the implementation only when an actual
+compiler, simulator, or test failure requires it.
+
+If block-local temporary declarations cause a real compiler error, use
+module-level temporary signals while preserving the same blocking-assignment
+calculation order. Do not remove or postpone the Stage 6 algorithm merely to
+avoid temporary variables.
+
+The intended Stage 6 flow is:
+
+1. Start from working copies of `z_m`, `z_e`, `guard_bit`, `round_bit`, and
+   `sticky`.
+2. Perform underflow alignment and update the working G/R/S information.
+3. Perform required normalization using the updated working values.
+4. Perform RNE using the updated working mantissa and G/R/S values.
+5. Handle rounding carry by renormalizing the mantissa and incrementing the
+   exponent when required.
+6. Commit the final working values to the registered state signals.
+7. Advance to `counter == 7`.
 
 This stage performs:
 1. **Underflow alignment** toward the minimum normal exponent:
