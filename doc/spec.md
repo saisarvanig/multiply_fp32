@@ -174,13 +174,17 @@ This stage performs:
    - After alignment, the exponent used for packing must represent the
      resulting value at the `-126` boundary.
 
-2. **Normalize** when the significand is not in the required normalized
-   position:
-   - If the most-significant significand bit is missing, shift the
-     significand left until the required leading bit is restored.
-   - Decrement the exponent for every left shift.
-   - Bits shifted through the rounding boundary must be incorporated into
-     the rounding information rather than discarded.
+2. **Normalize** only when the underflow-alignment condition was false:
+   - Underflow alignment and normal-result normalization are mutually
+     exclusive operations.
+   - Implement this as one conditional path: if `z_e < -126`, perform the
+     required right-shift alignment to `-126`; otherwise, if the significand
+     is not normalized, perform left-shift normalization.
+   - Never perform a left-shift normalization after an underflow alignment in
+     the same Stage 6 operation.
+   - For normal-result normalization, decrement the exponent for each left
+     shift and preserve all rounding information crossing the G/R/S boundary.
+   - The exponent must never be reduced below `-126` by this normalization.
 3. **RNE rounding**:
    - Perform round-to-nearest-even using the values of `G`, `R`, `S`, and
   the current least-significant retained mantissa bit (`LSB`) after all
