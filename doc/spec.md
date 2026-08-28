@@ -100,10 +100,23 @@ All stage actions are performed inside a single sequential always block using `c
   - If exponent is nonzero => sets implicit leading 1: `a_m[23] = 1`.
   - If exponent is zero (subnormal) => forces exponent to -126 (subnormal exponent baseline).
 
-> If you restrict inputs to **normal numbers only**, then:
-> - `expA` and `expB` are always 1..254,
-> - hidden-one insertion always happens,
-> - special logic is bypassed in practice.
+- Even though the grading domain is normal finite inputs, the RTL must still
+  implement the Stage 2 classification signals already implied by the design:
+  `a_is_nan`, `b_is_nan`, `a_is_inf`, `b_is_inf`, `a_is_zero`, and `b_is_zero`.
+- If a special case is detected, latch a `special_case` flag and the final
+  `special_z` value in Stage 2 so that Stage 7 can return that value directly
+  without running the ordinary multiplication/normalization path.
+- Apply special-case priority in this exact order:
+  1. If either operand is NaN, or if one operand is infinity and the other is
+     zero, produce canonical quiet NaN `32'h7FC0_0000`.
+  2. Otherwise, if either operand is infinity, produce signed infinity
+     `{a_s ^ b_s, 8'hFF, 23'd0}`.
+  3. Otherwise, if either operand is zero, produce signed zero
+     `{a_s ^ b_s, 8'd0, 23'd0}`.
+- NaN payloads must not be propagated; every NaN result uses exactly
+  `32'h7FC0_0000`.
+- For normal finite inputs, continue through the ordinary seven-stage multiply
+  path unchanged.
 
 ### Stage 3 — Input normalization (lightweight)
 - If mantissa MSB is not set, shift left and decrement exponent.
@@ -198,6 +211,8 @@ This stage performs:
      - If rounding overflows mantissa, set mantissa to 0x800000 and increment exponent.
 
 ### Stage 7 — Pack
+- If `special_case` is set, output the latched `special_z` instead of the
+  computed normal-path result.
 - For normal path:
   - Pack sign, biased exponent, fraction.
   - If exponent indicates overflow -> output INF.
