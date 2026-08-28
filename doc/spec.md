@@ -88,7 +88,13 @@ The FSM is controlled by:
 - `counter` (stage number 1..7)
 
 All stage actions are performed inside a single sequential always block using `case(counter)`.
+### Sequential implementation requirements
 
+- The asynchronous reset must initialize all state-holding registers to deterministic values, including `busy`, `counter`, operand registers, sign/exponent/mantissa registers, product registers, rounding registers, and output registers.
+- The first operation accepted after reset must therefore produce a deterministic result.
+- Each clocked `case(counter)` branch may contain multiple logical operations that depend on one another.
+- Do not assume that a non-blocking assignment (`<=`) updates a register immediately within the same clocked branch. If a later calculation in the same stage depends on an earlier calculation, use local temporary variables with blocking assignments (`=`) and perform the dependent operations in order.
+- Commit the final values to the actual state registers with non-blocking assignments (`<=`) after the intermediate calculations are complete.
 ### Stage 1 — Unpack
 - Extract mantissas into 24-bit regs (initially `{1'b0, frac}`).
 - Convert biased exponent into unbiased form: `exp - 127`.
@@ -122,50 +128,90 @@ All stage actions are performed inside a single sequential always block using `c
 - `sticky = OR(product[23:0])`
 
 ### Stage 6 — Normalize + Round-to-Nearest-Even (RNE)
-This stage performs:
-1. **Underflow alignment** toward the minimum normal exponent:
-   - If the intermediate exponent `z_e` is below `-126`, the significand
-     must be shifted right enough to bring the exponent to `-126`.
-   - Every bit discarded by this right shift must contribute to the sticky
-     condition used for rounding.
-   - The existing guard, round, and sticky information must not be silently
-     discarded when performing this alignment; the implementation must
-     preserve enough information to make the final RNE decision correctly.
-   - After alignment, the exponent used for packing must represent the
-     resulting value at the `-126` boundary.
 
-2. **Normalize** when the significand is not in the required normalized
-   position:
-   - If the most-significant significand bit is missing, shift the
-     significand left until the required leading bit is restored.
-   - Decrement the exponent for every left shift.
-   - Bits shifted through the rounding boundary must be incorporated into
-     the rounding information rather than discarded.
-3. **RNE rounding**:
-   - Perform round-to-nearest-even using the values of `G`, `R`, `S`, and
-  the current least-significant retained mantissa bit (`LSB`) after all
-  normalization and underflow alignment are complete.
-- The rounding increment condition is exactly:
-  `round_up = G && (R || S || LSB)`.
-- Do not make the rounding decision using G/R/S values from before a
-  normalization or underflow shift.
-- If rounding increments the retained mantissa and causes a carry into
-  the next exponent position, renormalize the mantissa and increment the
-  exponent by one.
-   - Handles carry-out from rounding:
-     - If rounding overflows mantissa, set mantissa to 0x800000 and increment exponent.
+Stage 6 is one FSM state, but its operations are logically sequential within
+that clock cycle. Use local working values for the mantissa, exponent, guard,
+round, and sticky information so that each sub-step sees the result of the
+previous sub-step.
+
+The required order is:
+
+1. Underflow alignment
+2. Normalization
+3. Round-to-Nearest-Even
+
+#### Sub-step A — Underflow alignment
+
+- If the intermediate exponent `z_e` is below `-126`, calculate:
+
+  `sh = -126 - $signed(z_e)`
+
+- Shift the retained significand right by `sh` so that the working exponent
+  reaches `-126`.
+- Every `1` bit discarded from the retained significand must contribute to
+  the sticky condition.
+- Existing guard and round information that is shifted out of the retained
+  precision must also contribute to sticky rather than being discarded.
+- If the shift removes all retained significand bits, the retained
+  significand becomes zero, while sticky remains set whenever any discarded
+  information was nonzero.
+- After this alignment, the working exponent is `-126`.
+
+#### Sub-step B — Normalization
+
+- If underflow alignment was not required and the working significand does
+  not have the required leading `1` at bit 23, shift it left to restore the
+  required normalized position.
+- Decrement the working exponent for each left shift.
+- Preserve rounding information when bits cross the rounding boundary.
+- **Do not perform a left shift if it would make the exponent less than
+  `-126`.** In particular, when the working exponent is `-126` and bit 23 of
+  the working mantissa is zero, stop at the `-126` boundary.
+
+#### Sub-step C — Round-to-Nearest-Even
+
+- Perform rounding only after the underflow and normalization operations above
+  are complete.
+- Let `LSB` be the least-significant bit of the final retained mantissa.
+- The exact RNE increment condition is:
+
+  `round_up = G && (R || S || LSB)`
+
+- The G/R/S values used for rounding must be the updated values resulting from
+  the Stage 6 operations, not values from before a shift or normalization.
+- If `round_up` is true, increment the retained mantissa by one.
+- If the increment carries out of the retained mantissa, set the mantissa to
+  `24'h800000` and increment the exponent by one.
+
+After these sub-steps, write the final working mantissa, exponent, guard,
+round, and sticky values back to `z_m`, `z_e`, `guard_bit`, `round_bit`, and
+`sticky`.
 
 ### Stage 7 — Pack
-- For normal path:
-  - Pack sign, biased exponent, fraction.
-  - If exponent indicates overflow -> output INF.
-  - If exponent indicates exact denorm boundary -> force exponent field to 0 (denormal/zero representation).
-- Asserts `out_valid` for one cycle and clears `busy`.
 
+- For the normal path, pack the final sign, biased exponent, and fraction
+  into the 32-bit FP32 result.
+- If the final unbiased exponent is greater than `127`, output signed
+  infinity: `{z_s, 8'hFF, 23'd0}`.
+- If the final exponent is exactly `-126` and the retained mantissa is not
+  normalized (`z_m[23] == 0`), force the packed exponent field to zero while
+  retaining the mantissa produced by Stage 6.
+- Do not perform another independent general-purpose denormal conversion in
+  Stage 7.
+- Update `z`, assert `out_valid` for exactly one clock cycle, and clear
+  `busy`.
 ---
 
 ## Assumptions & Constraints
-- Inputs: `exp ∈ [1..254]` (no zeros/subnormals, no inf/nan)
+
+- Inputs used for grading are finite, normalized IEEE-754 binary32 numbers.
+- Therefore, operand exponent fields are in `1..254`.
+- Operand zero, subnormal, infinity, and NaN cases are outside the required
+  grading domain.
+- The implementation should prioritize correct bit-exact multiplication of
+  normal FP32 operands, including normalization, overflow handling, and
+  round-to-nearest-even behavior.
+- The interface, handshake behavior, and 7-cycle latency remain mandatory.
 
 ---
 
