@@ -113,7 +113,17 @@ All stage actions are performed inside a single sequential always block using `c
 - Compute result sign: `z_s = a_s ^ b_s`
 - Exponent add: `z_e = a_e + b_e + 1`
 - Mantissa product: `product = a_m * b_m * 4`
-  - The `*4` scaling aligns the product for extraction into `{z_m, G, R, S}`.
+  - The `*4` scaling aligns the product for extraction into `{z_m, G, R, S}`.	
+- The multiplication must be performed at sufficient width to preserve the
+  complete product before the `*4` scaling. Do not rely on the destination
+  register width to widen a 24-bit multiplication expression.
+- Since `a_m` and `b_m` are 24-bit values and `product` is 50 bits, explicitly
+  widen the operands before multiplication. An equivalent implementation is:
+
+  `product = ({26'd0, a_m} * {26'd0, b_m}) << 2`
+
+- The final scaled product must retain all required bits in `product[49:0]`;
+  do not truncate the multiplication to 24 bits.
 
 ### Stage 5 — Extract mantissa + rounding bits
 - `z_m = product[49:26]`
@@ -123,27 +133,6 @@ All stage actions are performed inside a single sequential always block using `c
 
 ### Stage 6 — Normalize + Round-to-Nearest-Even (RNE)
 
-**Stage 6 implementation requirement**
-
-Stage 6 must implement the complete specified normalization, underflow
-alignment, and round-to-nearest-even procedure. Do not replace Stage 6 with a
-simplified "normal-input" fast path.
-
-Even though the grading operands are normal FP32 numbers, the multiplication
-result can require exponent overflow handling, underflow alignment, mantissa
-normalization, and rounding. All of the specified Stage 6 behavior must
-therefore remain implemented.
-
-All normalization, underflow alignment, and RNE calculations must be completed
-while `counter == 6`. Do not move any of these calculations into Stage 7.
-
-Stage 7 must only consume the finalized Stage 6 mantissa/exponent result and
-pack it into the 32-bit FP32 output.
-
-If procedural local variable declarations cause tool-compatibility concerns,
-declare the required Stage 6 temporary signals at module scope instead. Do not
-remove, simplify, or postpone the Stage 6 algorithm merely to avoid temporary
-variables or SystemVerilog syntax issues.
 This stage performs:
 1. **Underflow alignment** toward the minimum normal exponent:
    - If the intermediate exponent `z_e` is below `-126`, the significand
