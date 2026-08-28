@@ -88,16 +88,6 @@ The FSM is controlled by:
 - `counter` (stage number 1..7)
 
 All stage actions are performed inside a single sequential always block using `case(counter)`.
-### Reset behavior
-
-On the asynchronous reset (`rst`), initialize all state-holding registers to
-deterministic values. This includes `busy`, `counter`, the registered operands,
-all sign/exponent/mantissa registers, `product`, the guard/round/sticky
-registers, and the output register `z`.
-
-After reset is released, the multiplier must start from its idle state. The
-first accepted operation must not depend on any stale or uninitialized
-intermediate value.
 
 ### Stage 1 — Unpack
 - Extract mantissas into 24-bit regs (initially `{1'b0, frac}`).
@@ -132,6 +122,28 @@ intermediate value.
 - `sticky = OR(product[23:0])`
 
 ### Stage 6 — Normalize + Round-to-Nearest-Even (RNE)
+
+**Stage 6 implementation requirement**
+
+Stage 6 must implement the complete specified normalization, underflow
+alignment, and round-to-nearest-even procedure. Do not replace Stage 6 with a
+simplified "normal-input" fast path.
+
+Even though the grading operands are normal FP32 numbers, the multiplication
+result can require exponent overflow handling, underflow alignment, mantissa
+normalization, and rounding. All of the specified Stage 6 behavior must
+therefore remain implemented.
+
+All normalization, underflow alignment, and RNE calculations must be completed
+while `counter == 6`. Do not move any of these calculations into Stage 7.
+
+Stage 7 must only consume the finalized Stage 6 mantissa/exponent result and
+pack it into the 32-bit FP32 output.
+
+If procedural local variable declarations cause tool-compatibility concerns,
+declare the required Stage 6 temporary signals at module scope instead. Do not
+remove, simplify, or postpone the Stage 6 algorithm merely to avoid temporary
+variables or SystemVerilog syntax issues.
 This stage performs:
 1. **Underflow alignment** toward the minimum normal exponent:
    - If the intermediate exponent `z_e` is below `-126`, the significand
