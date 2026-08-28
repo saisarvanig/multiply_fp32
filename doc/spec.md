@@ -167,11 +167,21 @@ This stage performs:
      - If rounding overflows mantissa, set mantissa to 0x800000 and increment exponent.
 
 ### Stage 7 — Pack
-- For normal path:
-  - Pack sign, biased exponent, fraction.
-  - If exponent indicates overflow -> output INF.
-  - If exponent indicates exact denorm boundary -> force exponent field to 0 (denormal/zero representation).
-- Asserts `out_valid` for one cycle and clears `busy`.
+
+- Stage 7 must only consume the finalized mantissa and exponent produced by
+  Stage 6. Do not perform normalization, shifting, or rounding in Stage 7.
+- For normal results, pack sign, biased exponent, and fraction.
+- If the finalized unbiased exponent is greater than `127`, output signed
+  infinity:
+  `{z_s, 8'hFF, 23'd0}`.
+- If the finalized exponent is exactly `-126` and `z_m[23] == 0`, pack the
+  result as a subnormal/zero representation with exponent field `0` and
+  retain `z_m[22:0]`.
+- If the finalized exponent is exactly `-126` and `z_m[23] == 1`, pack it as
+  the minimum normal result with exponent field `1`.
+- Do not convert a nonzero finalized subnormal mantissa to zero merely because
+  the exponent is `-126`.
+- Update `z`, assert `out_valid` for exactly one cycle, and clear `busy`.
 
 ---
 
